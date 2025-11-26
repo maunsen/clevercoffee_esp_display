@@ -13,6 +13,10 @@ It enables you to adjust key brewing parameters **directly at the machine** usin
 - Two additional hardware buttons
 - An **MQTT interface** to read sensor data and update setpoints
 
+[Here is the display with a rotary encoder and two buttons on one pcb that I used.](https://de.aliexpress.com/item/1005007582677371.html?gatewayAdapt=glo2deu)
+
+I used the 3,3-5V Version with the 1.3"screen.
+
 The panel displays real-time temperature, timing and weight data and allows changing all important brewing parameters without using the machine's web interface.
 
 ---
