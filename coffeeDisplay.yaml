@@ -1,0 +1,878 @@
+
+
+substitutions:
+  # Basis-Topic für CleverCoffee MQTT
+  # MQTT_TOPIC_PREFIX = "custom/Silvia."
+  # HOSTNAME z.B. "silvia"
+  # Ergibt: custom/Silvia.silvia/<Reading>
+  # TODO: HOSTNAME an deine userConfig.h anpassen
+  cc_base: !secret mqtt_base
+
+esphome:
+  name: clevercoffee-display
+  comment: "Display- und Menü-Panel für CleverCoffee PID"
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          // Interaktions-Timestamp beim Boot initialisieren
+          id(g_last_interaction_ms) = millis();
+      # Falls innerhalb von 10s keine Online-Meldung kommt, gehen wir von "Silvia offline" aus
+      - delay: 10s
+      - if:
+          condition:
+            lambda: 'return !id(g_machine_online);'
+          then:
+            - logger.log:
+                level: INFO
+                tag: "sleep"
+                format: "Kein Online-Status nach Boot -> schalte Anzeige aus"
+            # Offline-Screen anzeigen
+            - component.update: oled_display
+            # 3 Sekunden anzeigen, dann in den Soft-Sleep wechseln
+            - delay: 3s
+            - lambda: 'id(g_screen_sleeping) = true;'
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# ---------------- WLAN & MQTT ----------------
+wifi:
+  ssid: !secret wifi_ssid_iot
+  password: !secret wifi_password_iot
+  ap:
+    ssid: "clevercoffee-fallback"
+
+mqtt:
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  client_id: clevercoffee-display
+
+  # MQTT-Subscriptions für Ist-/Soll-Werte
+  on_message:
+    # Ziel-Brühtemperatur
+    - topic: ${cc_base}/brewSetpoint
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_brew_temp
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Ziel-Dampftemperatur
+    - topic: ${cc_base}/steamSetpoint
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_steam_temp
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Ist-Brühtemperatur
+    - topic: ${cc_base}/temperature
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping);'
+            then:
+              - globals.set:
+                  id: g_current_brew_temp
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Zeiten: Preinfusion
+    - topic: ${cc_base}/preinfusion
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_preinfusion
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Zeiten: Preinfusion Pause
+    - topic: ${cc_base}/preinfusionPause
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_preinf_pause
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Zeiten: Brühdauer
+    - topic: ${cc_base}/targetBrewTime
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_brew_time
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Zielgewicht (Weight Setpoint)
+    - topic: ${cc_base}/targetBrewWeight
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping) && id(g_ui_mode) == 0;'
+            then:
+              - globals.set:
+                  id: g_target_weight
+                  value: !lambda "return atof(x.c_str());"
+              #- component.update: oled_display
+
+    # Backflush Status (0/1)
+    - topic: ${cc_base}/backflushOn
+      qos: 0
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_screen_sleeping);'
+            then:
+              - lambda: |-
+                  id(g_backflush_on) = (x == "1");
+
+    # Maschinenstatus: online/offline
+    - topic: ${cc_base}/status
+      qos: 0
+      then:
+        - lambda: |-
+            // Rohpayload loggen und tolerant auswerten
+            std::string s = x;
+            ESP_LOGD("status", "MQTT Status payload '%s'", s.c_str());
+            for (auto &c : s) {
+              c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            }
+            if (s.find("online") != std::string::npos) {
+              id(g_machine_online) = true;
+            } else {
+              id(g_machine_online) = false;
+            }
+        - if:
+            condition:
+              lambda: 'return !id(g_machine_online);'
+            then:
+              - logger.log:
+                  level: WARN
+                  tag: "sleep"
+                  format: "Silvia offline -> Anzeige aus"
+              # Offline-Screen zeichnen lassen
+              - component.update: oled_display
+              # Kurze Anzeigezeit, dann in Soft-Sleep wechseln
+              - delay: 3s
+              - lambda: 'id(g_screen_sleeping) = true;'
+
+logger:
+  level: WARN
+
+#api:
+#  encryption:
+#    key: E9FY6HQaAZS5pk0xJFrZ75LbnzMVRI3gPsnZhlsExyV=
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ---------------- Globale Zustände ----------------
+globals:
+  # Seite / Menü:
+  # 0 = Temperaturen
+  # 1 = Zeiten
+  # 2 = Waage / Backflush
+  - id: g_page
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  # Auswahlindex innerhalb der Seite
+  # Seite 0: 0 = Ziel-Brühtemp, 1 = Brühdauer, 2 = Gewicht
+  # Seite 1: 0 = Preinfusion, 1 = Pause, 2 = Ziel-Dampftemp
+  # Seite 2: 0 = Waage Tara, 1 = Backflush
+  - id: g_sel_index
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  # UI-Modus:
+  # 0 = Auswahlmodus (scrollen)
+  # 1 = Editmodus (Wert ändern)
+  - id: g_ui_mode
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # Soll-Werte Temperatur
+  - id: g_target_brew_temp
+    type: float
+    restore_value: true
+    initial_value: '95.0'
+
+  - id: g_target_steam_temp
+    type: float
+    restore_value: true
+    initial_value: '125.0'
+
+  # Soll-Wert Zielgewicht (in g)
+  - id: g_target_weight
+    type: float
+    restore_value: true
+    initial_value: '36.0'
+
+  # Ist-Brühtemperatur
+  - id: g_current_brew_temp
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  # Soll-Werte Zeiten
+  - id: g_target_preinfusion
+    type: float
+    restore_value: true
+    initial_value: '2.0'     # Sekunden
+
+  - id: g_target_preinf_pause
+    type: float
+    restore_value: true
+    initial_value: '5.0'     # Sekunden
+
+  - id: g_target_brew_time
+    type: float
+    restore_value: true
+    initial_value: '25.0'    # Sekunden
+
+  # Backup-Werte für Abbruch im Editmodus
+  - id: g_backup_brew_temp
+    type: float
+    restore_value: false
+    initial_value: '95.0'
+
+  - id: g_backup_steam_temp
+    type: float
+    restore_value: false
+    initial_value: '125.0'
+
+  - id: g_backup_weight
+    type: float
+    restore_value: false
+    initial_value: '36.0'
+
+  - id: g_backup_preinfusion
+    type: float
+    restore_value: false
+    initial_value: '2.0'
+
+  - id: g_backup_preinf_pause
+    type: float
+    restore_value: false
+    initial_value: '5.0'
+
+  - id: g_backup_brew_time
+    type: float
+    restore_value: false
+    initial_value: '25.0'
+
+  # Display-Sleep & Aktivitäts-Tracking
+  - id: g_screen_sleeping
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: g_last_interaction_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  # Maschinen-Online-Status
+  - id: g_machine_online
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# ---------------- Hilfs-Flags für Aktionen ----------------
+  - id: g_backflush_on
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: do_scale_tare
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: do_backflush
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+
+# ---------------- I2C & Display (SH1106) ----------------
+i2c:
+  sda: 21
+  scl: 22
+  scan: true
+  frequency: 400kHz
+
+font:
+  - id: font_small
+    size: 10
+    file: "gfonts://Roboto"
+    glyphs: " !\"%()+=,-_.:/<>[]°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß"
+
+  - id: font_large
+    size: 14
+    file: "gfonts://Roboto"
+    glyphs: " !\"%()+=,-_.:/<>[]°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß"
+
+display:
+  - platform: ssd1306_i2c
+    id: oled_display
+    model: "SH1106 128x64"
+    address: 0x3C
+    update_interval: 250ms
+    lambda: |-
+      using namespace esphome::display;
+
+      // Wenn im Sleep-Modus: schwarzen Bildschirm zeichnen und nichts weiter tun
+      if (id(g_screen_sleeping)) {
+        it.fill(COLOR_OFF);
+        return;
+      }
+
+      // Wenn Silvia nicht online ist, kurzen Hinweis anzeigen
+      if (!id(g_machine_online)) {
+        it.fill(COLOR_OFF);
+        it.printf(64, 24, id(font_large), TextAlign::TOP_CENTER, "Silvia");
+        it.printf(64, 40, id(font_large), TextAlign::TOP_CENTER, "offline");
+        return;
+      }
+
+      const int page = id(g_page);
+      const int sel  = id(g_sel_index);
+      const bool edit = (id(g_ui_mode) == 1);
+
+      // --- Header mit Mini-Pagination ---
+      if (page == 0) {
+        // Seite 1/3: Temperaturen, mit Edit-Hinweis und Ist-Temperatur
+        it.printf(0, 0, id(font_small), TextAlign::TOP_LEFT,
+                  "Brühen%s (1/3)", edit ? "[E]" : "");
+        it.printf(128, 0, id(font_small), TextAlign::TOP_RIGHT,
+                  "%.1fC", id(g_current_brew_temp));
+      } else if (page == 1) {
+        // Seite 2/3: Zeiten
+        it.printf(0, 0, id(font_small), TextAlign::TOP_LEFT,
+                  "Time%s (2/3)", edit ? "[E]" : "");
+      } else {
+        // Seite 3/3: Funktionen, kein Editmodus
+        it.printf(0, 0, id(font_small), TextAlign::TOP_LEFT,
+                  "Funktionen (3/3)");
+      }
+
+      // Trennlinie unter der Kopfzeile
+      it.line(0, 12, 127, 12);
+
+      // Konstanten für Zeilen-Y-Positionen (Raster)
+      const int row1_y = 20;
+      const int row2_y = 34;
+      const int row3_y = 48;
+
+      // --- Seite 0: Temperatur + Brühdauer + Gewicht ---
+      if (page == 0) {
+        // Brew-Temperatur
+        if (sel == 0) {
+          it.printf(0, row1_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Temperatur");
+          if (edit) {
+            // Im Editmodus Wert hervorheben
+            it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.1fC]", id(g_target_brew_temp));
+          } else {
+            it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.1fC", id(g_target_brew_temp));
+          }
+        } else {
+          it.printf(0, row1_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Temperatur");
+          it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.1fC", id(g_target_brew_temp));
+        }
+
+        // Brühdauer
+        if (sel == 1) {
+          it.printf(0, row2_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Brühdauer");
+          if (edit) {
+            it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.0fs]", id(g_target_brew_time));
+          } else {
+            it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.0fs", id(g_target_brew_time));
+          }
+        } else {
+          it.printf(0, row2_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Brühdauer");
+          it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.0fs", id(g_target_brew_time));
+        }
+
+        // Zielgewicht
+        if (sel == 2) {
+          it.printf(0, row3_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Gewicht");
+          if (edit) {
+            it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.0fg]", id(g_target_weight));
+          } else {
+            it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.0fg", id(g_target_weight));
+          }
+        } else {
+          it.printf(0, row3_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Gewicht");
+          it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.0fg", id(g_target_weight));
+        }
+      }
+
+      // --- Seite 1: Zeiten ---
+      if (page == 1) {
+        // PI (Preinfusion)
+        if (sel == 0) {
+          it.printf(0, row1_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Preinfusion");
+          if (edit) {
+            it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.1fs]", id(g_target_preinfusion));
+          } else {
+            it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.1fs", id(g_target_preinfusion));
+          }
+        } else {
+          it.printf(0, row1_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Preinfusion");
+          it.printf(124, row1_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.1fs", id(g_target_preinfusion));
+        }
+
+        // PI-P (Preinfusion Pause)
+        if (sel == 1) {
+          it.printf(0, row2_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Pause");
+          if (edit) {
+            it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.1fs]", id(g_target_preinf_pause));
+          } else {
+            it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.1fs", id(g_target_preinf_pause));
+          }
+        } else {
+          it.printf(0, row2_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Pause");
+          it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.1fs", id(g_target_preinf_pause));
+        }
+
+        // Dampf-Temperatur
+        if (sel == 2) {
+          it.printf(0, row3_y, id(font_large), TextAlign::TOP_LEFT,
+                    "> Dampf");
+          if (edit) {
+            it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "[%.0fC]", id(g_target_steam_temp));
+          } else {
+            it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                      "%.0fC", id(g_target_steam_temp));
+          }
+        } else {
+          it.printf(0, row3_y, id(font_large), TextAlign::TOP_LEFT,
+                    "   Dampf");
+          it.printf(124, row3_y, id(font_large), TextAlign::TOP_RIGHT,
+                    "%.0fC", id(g_target_steam_temp));
+        }
+      }
+
+      // --- Seite 2: Funktionen (Waage / Backflush) ---
+      if (page == 2) {
+        const char *arrow_tare  = (sel == 0 ? ">" : " ");
+        const char *arrow_flush = (sel == 1 ? ">" : " ");
+        const char *status_flush = id(g_backflush_on) ? "AN" : "AUS";
+
+        // ASCII-"Icons": [T] für Tare, [B] für Backflush
+        it.printf(0, row1_y, id(font_large), TextAlign::TOP_LEFT,
+                  "%s Tare", arrow_tare);
+
+        it.printf(0, row2_y, id(font_large), TextAlign::TOP_LEFT,
+                  "%s Backflush", arrow_flush);
+        // Status rechtsbündig anzeigen
+        it.printf(124, row2_y, id(font_large), TextAlign::TOP_RIGHT,
+                  "%s", status_flush);
+      }
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          // 300000 ms = 5 Minuten
+          if (!id(g_screen_sleeping) && (now - id(g_last_interaction_ms) > 300000UL)) {
+            id(g_screen_sleeping) = true;
+          }
+
+# ---------------- Rotary Encoder (EC11) ----------------
+sensor:
+  - platform: rotary_encoder
+    id: encoder
+    pin_a:
+      number: GPIO32
+      mode: INPUT_PULLUP
+    pin_b:
+      number: GPIO33
+      mode: INPUT_PULLUP
+    resolution: 2
+
+    on_clockwise:
+      then:
+        - lambda: |-
+            // Wenn das Display schläft: nur wecken, keine Aktion ausführen
+            if (id(g_screen_sleeping)) {
+              id(g_screen_sleeping) = false;
+              id(g_last_interaction_ms) = millis();
+              return;
+            }
+
+            // Software-Teilung: nur jedes zweite Encoder-Event auswerten
+            static bool cw_toggle = false;
+            cw_toggle = !cw_toggle;
+            if (cw_toggle) {
+              // beim ersten Event nichts tun, erst beim zweiten
+              return;
+            }
+
+            if (id(g_ui_mode) == 0) {
+              // Auswahlmodus: innerhalb der Seite scrollen
+              if (id(g_page) == 0) {           // 3 Einträge (Brew, Steam, Wt)
+                id(g_sel_index) = (id(g_sel_index) + 1) % 3;
+              } else if (id(g_page) == 1) {    // 3 Einträge
+                id(g_sel_index) = (id(g_sel_index) + 1) % 3;
+              } else if (id(g_page) == 2) {    // 2 Einträge
+                id(g_sel_index) = (id(g_sel_index) + 1) % 2;
+              }
+            } else {
+              // Editmodus: Wert erhöhen
+              switch (id(g_page)) {
+                case 0:
+                  if (id(g_sel_index) == 0) {
+                    // Ziel-Brühtemperatur: 0,1°C
+                    id(g_target_brew_temp) += 0.1f;
+                  } else if (id(g_sel_index) == 1) {
+                    // Brühdauer: 1s
+                    id(g_target_brew_time) += 1.0f;
+                  } else if (id(g_sel_index) == 2) {
+                    // Zielgewicht: 1g
+                    id(g_target_weight) += 1.0f;
+                  }
+                  break;
+                case 1:
+                  if (id(g_sel_index) == 0) {
+                    // Preinfusion: 0,1s
+                    id(g_target_preinfusion) += 0.1f;
+                  } else if (id(g_sel_index) == 1) {
+                    // Preinfusion Pause: 0,5s
+                    id(g_target_preinf_pause) += 0.5f;
+                  } else if (id(g_sel_index) == 2) {
+                    // Ziel-Dampftemperatur: 1°C
+                    id(g_target_steam_temp) += 1.0f;
+                  }
+                  break;
+                default:
+                  break;
+              }
+            }
+            // Interaktionszeit aktualisieren
+            id(g_last_interaction_ms) = millis();
+
+    on_anticlockwise:
+      then:
+        - lambda: |-
+            // Wenn das Display schläft: nur wecken, keine Aktion ausführen
+            if (id(g_screen_sleeping)) {
+              id(g_screen_sleeping) = false;
+              id(g_last_interaction_ms) = millis();
+              return;
+            }
+
+            // Software-Teilung: nur jedes zweite Encoder-Event auswerten
+            static bool ccw_toggle = false;
+            ccw_toggle = !ccw_toggle;
+            if (ccw_toggle) {
+              // beim ersten Event nichts tun, erst beim zweiten
+              return;
+            }
+
+            if (id(g_ui_mode) == 0) {
+              // Auswahlmodus: innerhalb der Seite scrollen (rückwärts)
+              if (id(g_page) == 0) {           // 3 Einträge (Brew, Steam, Wt)
+                id(g_sel_index) = (id(g_sel_index) - 1 + 3) % 3;
+              } else if (id(g_page) == 1) {    // 3 Einträge
+                id(g_sel_index) = (id(g_sel_index) - 1 + 3) % 3;
+              } else if (id(g_page) == 2) {    // 2 Einträge
+                id(g_sel_index) = (id(g_sel_index) - 1 + 2) % 2;
+              }
+            } else {
+              // Editmodus: Wert verringern
+              switch (id(g_page)) {
+                case 0:
+                  if (id(g_sel_index) == 0) {
+                    id(g_target_brew_temp) -= 0.1f;
+                  } else if (id(g_sel_index) == 1) {
+                    id(g_target_brew_time) -= 1.0f;
+                  } else if (id(g_sel_index) == 2) {
+                    id(g_target_weight) -= 1.0f;
+                  }
+                  break;
+                case 1:
+                  if (id(g_sel_index) == 0) {
+                    // Preinfusion: 0,1s
+                    id(g_target_preinfusion) -= 0.1f;
+                  } else if (id(g_sel_index) == 1) {
+                    // Preinfusion Pause: 0,5s
+                    id(g_target_preinf_pause) -= 0.5f;
+                  } else if (id(g_sel_index) == 2) {
+                    // Ziel-Dampftemperatur: 1°C
+                    id(g_target_steam_temp) -= 1.0f;
+                  }
+                  break;
+                default:
+                  break;
+              }
+            }
+            // Interaktionszeit aktualisieren
+            id(g_last_interaction_ms) = millis();
+
+# ---------------- Buttons & Encoder-Klick ----------------
+binary_sensor:
+  # Encoder-Button: Auswahl / Edit bestätigen
+  - platform: gpio
+    id: encoder_button
+    pin:
+      number: GPIO25        # TODO: an deinen EC11-Pin anpassen
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      then:
+        - lambda: |-
+            // Wenn das Display schläft: nur wecken, keine Aktion ausführen
+            if (id(g_screen_sleeping)) {
+              id(g_screen_sleeping) = false;
+              id(g_last_interaction_ms) = millis();
+              return;
+            }
+
+            if (id(g_ui_mode) == 0) {
+              // Auswahlmodus -> je nach Seite
+              if (id(g_page) == 0) {
+                // Seite 0: Temperatur + Brühdauer + Gewicht -> in Editmodus wechseln und Backup anlegen
+                if (id(g_sel_index) == 0) {
+                  id(g_backup_brew_temp) = id(g_target_brew_temp);
+                  id(g_ui_mode) = 1;
+                } else if (id(g_sel_index) == 1) {
+                  id(g_backup_brew_time) = id(g_target_brew_time);
+                  id(g_ui_mode) = 1;
+                } else if (id(g_sel_index) == 2) {
+                  id(g_backup_weight) = id(g_target_weight);
+                  id(g_ui_mode) = 1;
+                }
+              } else if (id(g_page) == 1) {
+                // Seite 1: Zeiten + Dampf
+                if (id(g_sel_index) == 0) {
+                  id(g_backup_preinfusion) = id(g_target_preinfusion);
+                  id(g_ui_mode) = 1;
+                } else if (id(g_sel_index) == 1) {
+                  id(g_backup_preinf_pause) = id(g_target_preinf_pause);
+                  id(g_ui_mode) = 1;
+                } else if (id(g_sel_index) == 2) {
+                  id(g_backup_steam_temp) = id(g_target_steam_temp);
+                  id(g_ui_mode) = 1;
+                }
+              } else if (id(g_page) == 2) {
+                // Seite 2: Funktionen direkt ausführen
+                if (id(g_sel_index) == 0) {
+                  // Waage Tara
+                  id(do_scale_tare) = true;
+                } else if (id(g_sel_index) == 1) {
+                  // Backflush
+                  id(do_backflush) = true;
+                }
+              }
+            } else {
+              // Editmodus -> Änderungen übernehmen und senden
+              id(g_ui_mode) = 0;
+            }
+            // Interaktionszeit aktualisieren
+            id(g_last_interaction_ms) = millis();
+        #- component.update: oled_display
+        - if:
+            condition:
+              lambda: 'return id(g_ui_mode) == 0 && id(g_page) != 2;'
+            then:
+              - script.execute: publish_all_setpoints
+        - if:
+            condition:
+              lambda: 'return id(do_scale_tare);'
+            then:
+              - mqtt.publish:
+                  topic: ${cc_base}/scaleTareOn/set     # TODO: Topicname prüfen
+                  payload: "1"
+              - lambda: 'id(do_scale_tare) = false;'
+        - if:
+            condition:
+              lambda: 'return id(do_backflush);'
+            then:
+              - mqtt.publish:
+                  topic: ${cc_base}/backflushOn/set     # TODO: Topicname prüfen
+                  payload: !lambda |-
+                    // Toggle: wenn aktuell an (1), dann 0 senden, sonst 1
+                    return id(g_backflush_on) ? "0" : "1";
+              - lambda: 'id(do_backflush) = false;'
+
+  # Button A: nächstes Menü (Seite)
+  - platform: gpio
+    id: button_a
+    pin:
+      number: GPIO26
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      then:
+        - lambda: |-
+            // Wenn das Display schläft: nur wecken, keine Aktion ausführen
+            if (id(g_screen_sleeping)) {
+              id(g_screen_sleeping) = false;
+              id(g_last_interaction_ms) = millis();
+              return;
+            }
+
+            if (id(g_ui_mode) == 0) {
+              id(g_page) = (id(g_page) + 1) % 3;
+              id(g_sel_index) = 0;
+            }
+
+            // Interaktionszeit aktualisieren
+            id(g_last_interaction_ms) = millis();
+        #- component.update: oled_display
+
+  # Button B: vorheriges Menü / Abbruch
+  - platform: gpio
+    id: button_b
+    pin:
+      number: GPIO27
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      then:
+        - lambda: |-
+            // Wenn das Display schläft: nur wecken, keine Aktion ausführen
+            if (id(g_screen_sleeping)) {
+              id(g_screen_sleeping) = false;
+              id(g_last_interaction_ms) = millis();
+              return;
+            }
+
+            if (id(g_ui_mode) == 0) {
+              // vorherige Seite
+              id(g_page) = (id(g_page) - 1 + 3) % 3;
+              id(g_sel_index) = 0;
+            } else {
+              // Editmodus: Abbruch, alte Werte wiederherstellen
+              if (id(g_page) == 0) {
+                if (id(g_sel_index) == 0) {
+                  id(g_target_brew_temp) = id(g_backup_brew_temp);
+                } else if (id(g_sel_index) == 1) {
+                  id(g_target_brew_time) = id(g_backup_brew_time);
+                } else if (id(g_sel_index) == 2) {
+                  id(g_target_weight) = id(g_backup_weight);
+                }
+              } else if (id(g_page) == 1) {
+                if (id(g_sel_index) == 0) {
+                  id(g_target_preinfusion) = id(g_backup_preinfusion);
+                } else if (id(g_sel_index) == 1) {
+                  id(g_target_preinf_pause) = id(g_backup_preinf_pause);
+                } else if (id(g_sel_index) == 2) {
+                  id(g_target_steam_temp) = id(g_backup_steam_temp);
+                }
+              }
+              id(g_ui_mode) = 0;
+            }
+
+            // Interaktionszeit aktualisieren
+            id(g_last_interaction_ms) = millis();
+        # - component.update: oled_display
+
+
+# ---------------- MQTT Publish Script ----------------
+script:
+  - id: publish_all_setpoints
+    then:
+      - mqtt.publish:
+          topic: ${cc_base}/brewSetpoint/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.1f", id(g_target_brew_temp));
+            return std::string(buf);
+
+      - mqtt.publish:
+          topic: ${cc_base}/steamSetpoint/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.0f", id(g_target_steam_temp));
+            return std::string(buf);
+
+      - mqtt.publish:
+          topic: ${cc_base}/preinfusion/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.1f", id(g_target_preinfusion));
+            return std::string(buf);
+
+      - mqtt.publish:
+          topic: ${cc_base}/preinfusionPause/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.1f", id(g_target_preinf_pause));
+            return std::string(buf);
+
+      - mqtt.publish:
+          topic: ${cc_base}/targetBrewTime/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.0f", id(g_target_brew_time));
+            return std::string(buf);
+
+      - mqtt.publish:
+          topic: ${cc_base}/targetBrewWeight/set
+          payload: !lambda |-
+            char buf[16];
+            sprintf(buf, "%.0f", id(g_target_weight));
+            return std::string(buf);
