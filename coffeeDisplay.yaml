@@ -191,7 +191,7 @@ logger:
 
 #api:
 #  encryption:
-#    key: E9FY6HQaAZS5pk0xJFrZ75LbnzMVRI3gPsnZhlsExyV=
+#    key: !secret api_token
 ota:
   - platform: esphome
     password: !secret ota_password
